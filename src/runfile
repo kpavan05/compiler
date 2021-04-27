@@ -1,0 +1,17 @@
+!/bin/bash
+
+touch node.h
+touch node.c
+touch parser.y
+touch compiler.c
+touch scanner.lex
+set -e
+make -f Makefile
+rm -f  out.txt
+rm -f  valid.txt
+
+./compiler -s parser <input.txt >out.txt
+./compiler -s parser <out.txt >valid.txt
+
+
+

@@ -1,0 +1,7 @@
+================= SYMBOLS ================
+symbol table: global 
+   variables:
+    variable: print_int /* 0x6000388d0  */
+     [void][function([signed int])]
+
+

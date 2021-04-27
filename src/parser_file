@@ -1,0 +1,2 @@
+void print_int /* global */(signed int i );
+

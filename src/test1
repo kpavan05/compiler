@@ -1,0 +1,36 @@
+int print(char *s);
+int print_string(char *str[]);
+
+int print(char *s){
+	int i;
+        i = 0;   
+	for (i= 0; i<5 ; i++){
+	   if (i== 0)
+	      goto i0;
+	   if (i == 1)
+	       goto i1;
+
+	   if (i == 2)
+	       goto i2;
+
+	   if (i == 3)
+	       goto i3;
+	}
+
+
+i0:  
+     return 0;
+
+i1: 
+   return 1;
+
+i2: {
+	int j;
+	j =2;
+	return j;
+}
+i3 :
+  return 3;
+
+}
+

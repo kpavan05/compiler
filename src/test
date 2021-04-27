@@ -1,0 +1,13 @@
+int z;
+void func(int a, int b)
+{
+   for (j = i + 1; j < size; j++) {
+          if (0 != matrix[j][i]) {
+            for (k = i; k < size; k++) {
+              matrix[i][k] ^= matrix[j][k];
+            }
+            denominator *= -1;
+            break;
+          }
+   }
+}
