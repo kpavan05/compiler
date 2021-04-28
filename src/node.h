@@ -116,14 +116,25 @@ enum node_kind {
   NODE_POINTER_DECL,
   NODE_FUNC_DEF_SPEC,
   NODE_COMP_STATEMENT,
-  NODE_NULL_STATEMENT
+  NODE_NULL_STATEMENT,
+  NODE_TYPE_CAST,
+  NODE_DUMMY
+};
+
+enum node_type {
+  NODE_NONE =0,
+  NODE_UNARY,
+  NODE_BINARY,
+  NODE_TERNARY
 };
 
 struct node {
   enum node_kind kind;
+  enum node_type ntype;
   struct location location;
   struct ir_section *ir;
-  int iserror;
+
+  struct node* parent;
   char node_name[32];
 
   union {
@@ -157,28 +168,36 @@ struct node {
 
     struct {
 	    char* string;
+      char* rstring;
+      int rlen;
 	    int strlen;
+      struct string_table *entry;
     } string_literal;
    
    struct {
+      int isspecial;
       struct node* child_operand;
+      struct result result;
     }unary;
 
-   struct {
-      
+   struct {      
       struct node  *left_operand;
       struct node *right_operand;
+      struct result result;
     }binary;
    
-   struct {
-     
+   struct {     
      struct node *left_operand;
      struct node *middle_operand;
      struct node *right_operand;
+     struct result result;
     }ternary;
 
   } data;
+
+  
 };
+
 
 enum node_binary_operation {
   BINOP_MULTIPLICATION,

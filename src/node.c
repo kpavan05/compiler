@@ -45,8 +45,9 @@ static struct node *node_create(enum node_kind kind, YYLTYPE location) {
 
   n->kind = kind;
   n->location = location;
-
+  n->ntype = NODE_NONE;
   n->ir = NULL;
+  n->parent = NULL;
   return n;
 }
 
@@ -55,6 +56,10 @@ struct node *node_one_operand(enum node_kind kind, char *name, struct node *chil
   struct node *node = node_create(kind, location);
   strcpy(node->node_name, name);
   node->data.unary.child_operand = child_operand;
+  if (node->data.unary.child_operand != NULL)
+  node->data.unary.child_operand->parent = node;
+  node->data.unary.isspecial = 0;
+  node->ntype = NODE_UNARY;
   return node;
 }
 
@@ -65,6 +70,11 @@ struct node *node_two_operands(enum node_kind kind, char *name, struct node* lef
   strcpy(node->node_name, name);
   node->data.binary.left_operand = left_operand;
   node->data.binary.right_operand = right_operand;
+  if (node->data.binary.left_operand != NULL)
+  node->data.binary.left_operand->parent = node;
+  if (node->data.binary.right_operand != NULL)
+  node->data.binary.right_operand->parent = node;
+  node->ntype = NODE_BINARY;
   return node;
 }
  
@@ -76,6 +86,13 @@ struct node *node_three_operands(enum node_kind kind, char *name, struct node* l
   node->data.ternary.left_operand = left_operand;
   node->data.ternary.middle_operand = middle_operand;
   node->data.ternary.right_operand = right_operand;
+  if (node->data.ternary.left_operand != NULL)
+  node->data.ternary.left_operand->parent = node;
+  if (node->data.ternary.middle_operand != NULL)
+  node->data.ternary.middle_operand->parent = node;
+  if (node->data.ternary.right_operand != NULL)
+  node->data.ternary.right_operand->parent = node;
+  node->ntype = NODE_TERNARY;
   return node;
 }
 
@@ -105,6 +122,7 @@ struct node *node_identifier(YYLTYPE location, char *text, int length)
   memset(node->data.identifier.name, 0, IDENTIFIER_MAX + 1);
   strncpy(node->data.identifier.name, text, length);
   node->data.identifier.symbol = NULL;
+  node->ntype = NODE_UNARY;
   return node;
 }
 
@@ -144,7 +162,7 @@ struct node *node_string(YYLTYPE location, char *text, int length)
 			continue;
 		}
 	}
-
+    node->data.string_literal.rstring = (char*)malloc(length + 1);
 	node->data.string_literal.string = (char*)malloc(length + nescape*(sizeof(int)) + 1);
 	memset(node->data.string_literal.string, 0, length + nescape*(sizeof(int)) + 1);
 	if (node->data.string_literal.string == NULL){
@@ -160,10 +178,21 @@ struct node *node_string(YYLTYPE location, char *text, int length)
 			node->data.string_literal.string[k] = text[i];
 			k++;
 		}
+		node->data.string_literal.rstring[i] = text[i];
 	}
+	node->data.string_literal.rlen = length;
+	node->data.string_literal.rstring[length] = '\0';
 	reslen = strlen(node->data.string_literal.string);
 	node->data.string_literal.string[reslen] = '\0';
 	node->data.string_literal.strlen = reslen;
+	node->ntype = NODE_UNARY;
+    /*
+	node->data.string_literal.result.type = type_array();
+	node->data.string_literal.result.type->data.arraytype.hassize = true;
+	node->data.string_literal.result.type->data.arraytype.arrsize = reslen;
+	node->data.string_literal.result.type->data.arraytype.target = type_basic(false, TYPE_BASIC_CHAR);
+	node->data.string_literal.result.islvalue = 1;
+	*/
 	free(pos);
 	return node;
 }
@@ -207,6 +236,7 @@ struct node *node_number(YYLTYPE location, char *text)
   }
   node->data.number.ischar = 0;
   node->data.number.result.ir_operand = NULL;
+  node->ntype = NODE_UNARY;
   return node;
 }
 
@@ -269,11 +299,14 @@ struct node *node_cconst(YYLTYPE location, char *text, int length)
 
 	node = node_create(NODE_NUMBER, location);
 
-	if (isnumber == 1){		
+	/*if (isnumber == 1){		
 		if (isoctal)
 			val = strtol(str, NULL, 8);
 		else
 			val = strtol(str, NULL, 10);
+	}*/
+	if (isoctal){
+		val = strtol(str, NULL, 8);
 	}
 	else {
 		if (strlen(str) > 1) iserror = 1;
@@ -285,8 +318,7 @@ struct node *node_cconst(YYLTYPE location, char *text, int length)
 			node->data.number.value = (val | 0xffffff00);
 		else
 			node->data.number.value = val ;
-		node->data.number.overflow = true;
-		node->data.number.result.type = type_basic(false, TYPE_BASIC_INT);
+		node->data.number.overflow = true;		
 	}
 	else{
 		if (val & 0x00000080)
@@ -294,12 +326,12 @@ struct node *node_cconst(YYLTYPE location, char *text, int length)
 		else 
 			node->data.number.value = val;		
 		node->data.number.overflow = false;
-		node->data.number.result.type = type_basic(false, TYPE_BASIC_INT);
 	}
 
+    node->data.number.result.type = type_basic(false, TYPE_BASIC_INT);
 	node->data.number.ischar = 1;
 	node->data.number.result.ir_operand = NULL;
-	node->iserror = iserror;
+	node->ntype = NODE_UNARY;
 	free(str);
 		
 	return node;
@@ -393,14 +425,27 @@ struct result *node_get_result(struct node *expression) {
     case NODE_NUMBER:
       return &expression->data.number.result;
     case NODE_IDENTIFIER:
+      if (!expression->data.identifier.symbol) return NULL;
       return &expression->data.identifier.symbol->result;
+    case NODE_STRING:
+      return &expression->data.string_literal.entry->result;
     case NODE_BINARY_OPERATION:
       return &expression->data.binary_operation.result;
     default:
-      assert(0);
+      switch(expression->ntype) {
+      	case NODE_UNARY:
+      	   return &expression->data.unary.result;
+      	case NODE_BINARY:
+      	   return &expression->data.binary.result;
+      	case NODE_TERNARY:
+      	   return &expression->data.ternary.result;
+      	default:
+      	   break;
+      }
       return NULL;
   }
 }
+
 
 /**************************
  * PRINT PARSE TREE NODES *
@@ -446,16 +491,22 @@ static void node_print_string(FILE *output, struct node *expression) {
  * for each identifier, so that we can compare instances of the same
  * variable and ensure that they have the same symbol.
  */
-static void node_print_identifier(FILE *output, struct node *identifier) {
-  assert(NODE_IDENTIFIER == identifier->kind);
-  
-  
+static void node_print_identifier0(FILE *output, struct node *identifier) {
+  assert(NODE_IDENTIFIER == identifier->kind); 
   /*fprintf(output, "%s / * %p * /", identifier->data.identifier.name, 
                                  (void *)identifier->data.identifier.symbol);*/
   if (identifier->data.identifier.symbol != NULL)
-  	fprintf(output, "%s /* %s */", identifier->data.identifier.name,identifier->data.identifier.symbol->table_name);
+  	fprintf(output, "%s /* symbol table:%s */", identifier->data.identifier.name,identifier->data.identifier.symbol->table_name);
   else
   	fprintf(output, "%s ", identifier->data.identifier.name);
+
+  fprintf(output, "%s ", identifier->data.identifier.name);
+}
+
+static void node_print_identifier(FILE *output, struct node *identifier) {
+  assert(NODE_IDENTIFIER == identifier->kind);
+  
+  fprintf(output, "%s ", identifier->data.identifier.name);
 }
 
 static void node_print_array_decl(FILE *output, struct node *arr_decl) {
@@ -534,6 +585,48 @@ static void node_print_compound_statement(FILE *output, struct node *expression,
     }
     fprintf(output, "%s\n", STR_RIGHT_CURLY);
     nspace = curspace; 
+}
+
+static void node_print_typecast(FILE* output, struct node* expression, struct node* parent){
+	if(!parent) return;
+	switch (parent->kind){
+	    case NODE_POST_INCR:
+	    case NODE_POST_DECR:
+	      node_print_expression(output, expression->data.unary.child_operand, "");
+	      fprintf(output, "%s", "/*");
+	      type_print(output, expression->data.unary.result.type);
+	      /*symbol_print_type(output, expression->data.unary.result.type);*/
+	      fprintf(output, "%s","*/");
+	      break;
+	    case NODE_PRE_INCR:
+	    case NODE_PRE_DECR:
+	    case NODE_PLUS_EQUAL:
+	    case NODE_MINUS_EQUAL:
+	    case NODE_CARET_EQUAL:
+	    case NODE_SLASH_EQUAL:
+	    case NODE_PERCENT_EQUAL:
+	    case NODE_ASTERISK_EQUAL:
+	    case NODE_LESS_LESS_EQUAL:
+	    case NODE_AMPERSAND_EQUAL:
+	    case NODE_GREATER_GREATER_EQUAL:	      
+	      fprintf(output, "%s", "/*");
+	      type_print(output, expression->data.unary.result.type);
+	      /*symbol_print_type(output, expression->data.unary.result.type);*/
+	      fprintf(output, "%s","*/");
+	      node_print_expression(output, expression->data.unary.child_operand, "");
+	      break;
+	    case NODE_TYPE_CAST:
+	      node_print_typecast(output, expression, parent->parent);
+	      break;
+	    default:
+	      if (expression->data.unary.isspecial == 1)fprintf(output, "/*%s", STR_LEFT_PAREN);
+	      else fprintf(output, "%s", STR_LEFT_PAREN);
+	      type_print(output, expression->data.unary.result.type);
+	      if (expression->data.unary.isspecial == 1)fprintf(output, "%s*/",STR_RIGHT_PAREN);
+	      fprintf(output, "%s",STR_RIGHT_PAREN);   
+		  node_print_expression(output, expression->data.unary.child_operand, "");
+	      break;
+	}  
 }
 
 static void node_print_expression(FILE *output, struct node *expression,const char* separator) {
@@ -748,7 +841,7 @@ static void node_print_expression(FILE *output, struct node *expression,const ch
 	    case NODE_RETURN:	    
 	    case NODE_CONTINUE:
 	      fprintf(output, "%s ", expression->node_name);
-	      node_print_expression(output, expression->data.unary.child_operand, STR_SEMICOLON);
+	      node_print_expression(output, expression->data.unary.child_operand, ""/*STR_SEMICOLON*/);
 	      break;
         case NODE_LABEL:
           node_print_expression(output, expression->data.binary.left_operand, expression->node_name);
@@ -765,10 +858,11 @@ static void node_print_expression(FILE *output, struct node *expression,const ch
           node_print_expression(output, expression->data.binary.left_operand, STR_RIGHT_PAREN);
 	      node_print_expression(output, expression->data.binary.right_operand, "");
 	      break;
-
+        case NODE_TYPE_CAST:
+          node_print_typecast(output, expression, expression->parent);       
+	      break;
         case NODE_NULL_STATEMENT:
           break;  	    
-
 	    default:
 	      assert(0);
 	      break;
@@ -786,6 +880,21 @@ int eval_expr(struct node* node, int *val){
    if (node== NULL) return -1;
 
    switch (node->kind){
+   	    case NODE_TILDE:
+   	        if (eval_expr(node->data.unary.child_operand, &left) == 0){
+               *val = ~(left);
+   	        }
+   	        return -1;
+   	     case NODE_UNARY_PLUS:
+   	        if (eval_expr(node->data.unary.child_operand, &left) == 0){
+               *val = (left);
+   	        }
+   	        return -1;
+   	     case NODE_UNARY_MINUS:
+   	        if (eval_expr(node->data.unary.child_operand, &left) == 0){
+               *val = -left;
+   	        }
+   	        return -1;
 		case NODE_VBAR:
 		    if ((eval_expr(node->data.binary.left_operand, &left) == 0) && (eval_expr(node->data.binary.right_operand, &right) == 0)){
 		       *val = left | right; 
@@ -846,24 +955,21 @@ int eval_expr(struct node* node, int *val){
 		       return 0;
 		    }
 		    return -1;
+		case NODE_TERNARY_OP:
+		    if (eval_expr(node->data.ternary.left_operand, &left) == 0) {
+		       int middle = 0;
+               if (*val == 1 && eval_expr(node->data.ternary.middle_operand, &right) == 0)
+		       	  *val = middle;
+		       if (*val == 1 && eval_expr(node->data.ternary.right_operand, &right) == 0)
+		       	 *val = right; 
+		       return 0;
+		    }
+		    return -1;
 		case NODE_POST_INCR:
         case NODE_POST_DECR:
-           if (eval_expr(node->data.unary.child_operand, &left) == 0){
-           	  *val = left;
-           	  return 0;
-           }
-           return 1; 
         case NODE_PRE_INCR:
-           if (eval_expr(node->data.unary.child_operand, &left) == 0){
-           	  *val = left + 1;
-           	  return 0;
-           }
-           return 1;
         case NODE_PRE_DECR:
-           if (eval_expr(node->data.unary.child_operand, &left) == 0){
-           	*val = left - 1;
-           	return 0;
-           }
+           /* not a lvalue*/
            return 1;   
 	    case NODE_NUMBER:
 	        *val = (signed int)(node->data.number.value); 

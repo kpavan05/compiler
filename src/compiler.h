@@ -4,6 +4,7 @@
 #define IDENTIFIER_MAX 31
 
 struct result {
+  int islvalue;
   struct type *type;
   struct ir_operand *ir_operand;
 };

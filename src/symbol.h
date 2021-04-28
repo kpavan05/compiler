@@ -4,8 +4,11 @@
 #include <stdio.h>
 
 #include "compiler.h"
+#define DEF_MULTIPLIER 1
+
 struct node;
 struct type;
+struct typelist;
 
 enum label_kind{
   LABEL_REFER,
@@ -16,7 +19,10 @@ enum label_kind{
 struct symbol {
   char name[IDENTIFIER_MAX + 1];
   char table_name[IDENTIFIER_MAX + 1];
+  int st_offset;
+  int actual_sz;
   struct result result;
+  struct symbol_table *table;
 };
 
 struct symbol_list {
@@ -26,6 +32,7 @@ struct symbol_list {
 
 struct symbol_label_list {
   char name[IDENTIFIER_MAX + 1];
+  struct symbol symbol;
   enum label_kind kind;
   struct location location;
   struct symbol_label_list *next;
@@ -41,12 +48,19 @@ struct symbol_table {
   struct symbol_table *children;
   struct symbol_table *next;
   struct symbol_table *parent;
-
+  
+  int nvariables;
   bool haslabels;
   struct symbol_label_table * labeltable;
 };
 
 
+struct string_table {
+	char *string;
+	char label[IDENTIFIER_MAX + 1];
+	struct result result;
+	struct string_table *next;
+};
 /*
 struct symbol_table_list{
    struct symbol_table *curtable;
@@ -75,13 +89,21 @@ int symbol_add_from_array_decl(struct symbol_table *table, struct node *node, st
 int symbol_add_from_pointer_decl(struct symbol_table *table, struct node *node, struct type *base);
 int symbol_add_from_func_paramlst(struct symbol_table *table, struct type *func);
 int symbol_add_from_label(struct symbol_table *table, struct node *id, bool bdefine);
-
+struct node *symbol_convert_to_pointer_decl(struct node *node);
 struct symbol_label_list *symbol_find_label(struct symbol_table *table, struct node *id);
 
 struct type *symbol_func_create(struct node *node, struct type *rettype, bool badd);
 
 void symbol_check_labels(struct symbol_table *table);
+
 struct symbol *symbol_find_identfier(struct symbol_table *table, struct node *id);
-
-
+void symbol_add_string(struct node *node);
+struct string_table *symbol_find_string(char *s);
+struct symbol_table *symbol_find_table(struct symbol *symbol);
+int symbol_calculate_stack_frame_size(struct symbol *symbol);
+int symbol_calculate_curtable_size(struct symbol_table *table, struct symbol *symbol);
+int symbol_calculate_block_size(struct symbol_table *parent, struct symbol *symbol);
+int symbol_is_func_param(struct typelist *params, char *name);
+void symbol_print_strings(FILE *output);
+void symbol_print_globals(FILE *output, struct symbol_table *global);
 #endif /* _SYMBOL_H */

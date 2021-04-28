@@ -49,22 +49,40 @@ static void print_errors_from_pass(char *pass, int error_count) {
  */
 int main(int argc, char **argv) {
   FILE *output;
+  FILE *fpparser = NULL;
+  FILE *fpsymbol = NULL;
   struct symbol_table symbol_table;
   char *stage, output_name[NAME_MAX + 1];
+  char parse_file[NAME_MAX+1];
+  char sym_file[NAME_MAX+1];
+  char op_lvl[4];
   int opt;
   yyscan_t scanner;
   struct node *parse_tree;
   int error_count;
 
   strncpy(output_name, "output.s", NAME_MAX + 1);
+  parse_file[0] = '\0';
+  sym_file[0] = '\0';
+  op_lvl[0] = '\0';
   stage = "mips";
-  while (-1 != (opt = getopt(argc, argv, "o:s:"))) {
+
+  while (-1 != (opt = getopt(argc, argv, "o:s:l:p:t:"))) {
     switch (opt) {
       case 'o':
         strncpy(output_name, optarg, NAME_MAX);
         break;
+      case 'p':
+        strncpy(parse_file, optarg, NAME_MAX);
+        break;
+      case 't':
+        strncpy(sym_file, optarg, NAME_MAX);
+        break;
       case 's':
         stage = optarg;
+        break;
+      case 'l':
+        strncpy(op_lvl, optarg, 4);
         break;
     }
   }
@@ -114,41 +132,71 @@ int main(int argc, char **argv) {
   /*error_count = symbol_add_from_statement_list(&symbol_table, parse_tree);*/
   if (nerrors > 0) {
     print_errors_from_pass("Symbol table", nerrors);
-    /*return 1;*/
+    return 1;
   }
-  fprintf(stdout, "================= SYMBOLS ================\n");
-  symbol_print_table(stdout, &symbol_table);
+  if (sym_file[0] == '\0' || (fpsymbol = fopen(sym_file,"w")) == NULL){
+    fpsymbol = stdout;
+  }
+  if (parse_file[0] == '\0' || (fpparser = fopen(parse_file, "w")) == NULL){
+    fpparser = stdout;
+  }
+  fprintf(fpsymbol, "================= SYMBOLS ================\n");
+  symbol_print_table(fpsymbol, &symbol_table);
+
+  if (fpsymbol != stdout) fclose(fpsymbol);
   if (0 == strcmp("symbol", stage)) {
-    fprintf(stdout, "=============== PARSE TREE ===============\n");
-    node_print_parsetree_ouput(stdout, parse_tree);
+    fprintf(fpparser, "=============== PARSE TREE ===============\n");
+    node_print_parsetree_ouput(fpparser, parse_tree);
+    if (fpparser != stdout) fclose(fpparser);
     /*node_print_statement_list(stdout, parse_tree);*/
     return 0;
   }
 
-  error_count = type_assign_in_statement_list(parse_tree);
+  /*error_count = type_assign_in_statement_list(parse_tree);
   if (error_count > 0) {
     print_errors_from_pass("Type checking", error_count);
     return 1;
+  }*/
+  type_eval_expression(parse_tree);
+  if (nerrors > 0){
+    print_errors_from_pass("Type checking", nerrors);
+    return 1;
   }
   fprintf(stdout, "=============== PARSE TREE ===============\n");
-  node_print_statement_list(stdout, parse_tree);
+  node_print_parsetree_ouput(stdout, parse_tree);
+  /*node_print_statement_list(stdout, parse_tree);*/
   if (0 == strcmp("type", stage)) {
     return 0;
   }
 
-  error_count = ir_generate_for_statement_list(parse_tree);
-  if (error_count > 0) {
-    print_errors_from_pass("IR generation", error_count);
+  /*error_count = ir_generate_for_statement_list(parse_tree);*/
+  ir_generate_for_ast(parse_tree);
+  if (nerrors > 0) {
+    print_errors_from_pass("IR generation", nerrors);
     return 1;
   }
+
+
   fprintf(stdout, "=================== IR ===================\n");
   ir_print_section(stdout, parse_tree->ir);
-  if (0 == strcmp("ir", stage)) {
+  
+  if (0 == strcmp("ir", stage)) { 
+    if (strcmp(op_lvl, "lv") == 0){
+      fprintf(stdout, "=================== IR Analysis ===================\n");
+      ir_generate_live_analysis(parse_tree->ir);
+      ir_print_section(stdout, parse_tree->ir);
+    }
     return 0;
   }
 
+  if (strcmp(op_lvl, "l1") == 0){
+    fprintf(stdout, "=================== IR Optimization ===================\n");
+    ir_optimize(parse_tree->ir);
+    ir_print_section(stdout, parse_tree->ir);
+  }
+
   fprintf(stdout, "================== MIPS ==================\n");
-  mips_print_program(stdout, parse_tree->ir);
+  mips_print_program(stdout, parse_tree->ir, &symbol_table);
   fputs("\n\n", stdout);
 
   output = fopen(output_name, "w");
@@ -156,7 +204,7 @@ int main(int argc, char **argv) {
     fprintf(stdout, "Could not open output file %s: %s", optarg, strerror(errno));
     return 1;
   }
-  mips_print_program(output, parse_tree->ir);
+  mips_print_program(output, parse_tree->ir, &symbol_table);
   fputs("\n\n", output);
 
   return 0;

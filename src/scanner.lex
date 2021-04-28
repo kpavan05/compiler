@@ -189,13 +189,14 @@ void scanner_print_tokens(FILE *output, int *error_count, yyscan_t scanner) {
       fputs("     token = ERROR", output);
       (*error_count)++;
     } else {
-      fprintf(output, "     token = %-20s", parser_token_name(token));
+      fprintf(output, "     token = [%-20s]", parser_token_name(token));
 
       switch (token) {
         case NUMBER:
           /* Print the type and value. */
           fputs("     type = ", output);
           type_print(output, val->data.number.result.type);
+          fprintf(output, "     value = [%-10lu]", val->data.number.value);
 
 		  if (val->data.number.ischar)
 	        fprintf(output, "     value = %d", (int)(val->data.number.value));

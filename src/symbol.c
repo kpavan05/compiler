@@ -7,7 +7,7 @@
 #include "type.h"
 #include "symbol.h"
 
-
+static struct string_table *head = NULL;
 /************************
  * CREATE SYMBOL TABLES *
  ************************/
@@ -19,6 +19,7 @@ void symbol_initialize_table(struct symbol_table *table) {
   table->next = NULL;
   table->parent = NULL;
   table->haslabels = false;
+  table->nvariables = 0;
 }
 /*
 symbol_table_create- creates new symbol table 
@@ -31,7 +32,6 @@ struct symbol_table *symbol_table_create(){
 
   table = malloc(sizeof(struct symbol_table));
   assert(table != NULL);
-
   symbol_initialize_table(table);
   return table;
 }
@@ -105,10 +105,10 @@ static struct symbol *symbol_put(struct symbol_table *table, char name[]) {
   strncpy(symbol_list->symbol.table_name, table->name, IDENTIFIER_MAX);
   symbol_list->symbol.result.type = NULL;
   symbol_list->symbol.result.ir_operand = NULL;
-
+  
   symbol_list->next = table->variables;
   table->variables = symbol_list;
-
+  ++table->nvariables;
   return &symbol_list->symbol;
 }
 
@@ -118,8 +118,18 @@ static int symbol_add_from_identifier(struct symbol_table *table, struct node *i
   id->data.identifier.symbol = symbol_get(table, id->data.identifier.name);
   if (NULL == id->data.identifier.symbol) {
     if (define) {
+      if (restype != NULL && restype->kind == TYPE_VOID){
+        compiler_print_error(id->location, "void type for %s is not allowed", id->data.identifier.name);
+        return 1;
+      }
+      else if (restype != NULL &&  restype->kind == TYPE_POINTER && restype->data.ptrtype.target->kind == TYPE_FUNCTION){
+        compiler_print_error(id->location, "function poiner for %s is not allowed", id->data.identifier.name);
+        return 1;
+      }
       id->data.identifier.symbol = symbol_put(table, id->data.identifier.name);
       id->data.identifier.symbol->result.type = restype;
+      id->data.identifier.symbol->result.islvalue = 1;
+      id->data.identifier.symbol->table = table;
     } else {
       compiler_print_error(id->location, "undefined identifier %s", id->data.identifier.name);
       return 1;
@@ -200,7 +210,6 @@ int symbol_add_from_func_def_spec(struct symbol_table *table, struct node *node)
   struct type *func = NULL;
   struct node *curnode = NULL;
   struct type *pointert = NULL;
-  struct node *idnode = NULL;
   struct symbol *symbol = NULL;
   
   assert(node->kind == NODE_FUNC_DEF_SPEC);  
@@ -211,16 +220,24 @@ int symbol_add_from_func_def_spec(struct symbol_table *table, struct node *node)
   curnode = node->data.binary.right_operand;
   /* handle pointer return type before creating function type */
   if (curnode->kind == NODE_POINTER_DECL){
-    pointert = type_declarator(curnode, base, &idnode);
+    /*pointert = type_declarator(curnode, base, &idnode);*/
+    pointert = type_pointer_decl_create(curnode->data.binary.left_operand);
+    type_pointer_closure(pointert, base);
     curnode = curnode->data.binary.right_operand;
     func = symbol_func_create(curnode, pointert, true);
+  }
+  else if (curnode->kind == NODE_ARRAY_DECL){
+    compiler_print_error(node->location, "function cannot have array return type");
+    return 1;
   }
   else {
     /*create function type */
     func = symbol_func_create(curnode, base, true);
   }
   if (func == NULL) return 1;
-
+  if (curnode->data.binary.left_operand->kind == NODE_POINTER_DECL){
+     return symbol_add_from_pointer_decl(table, curnode->data.binary.left_operand, func);
+  }
   /* update table name with function name */
   strcpy(table->name, curnode->data.binary.left_operand->data.identifier.name);
 
@@ -229,8 +246,10 @@ int symbol_add_from_func_def_spec(struct symbol_table *table, struct node *node)
   
   /* add function id to parent table if not found. If found check for type mismatch*/
   if ((symbol = symbol_find_identfier(table->parent, curnode->data.binary.left_operand)) != NULL){
-     if (type_verify(symbol->result.type, func))
+     if (type_verify(symbol->result.type, func) != 0)
       compiler_print_error(curnode->data.binary.left_operand->location, "type mismatch for function %s\n", curnode->data.binary.left_operand->data.identifier.name);
+    curnode->data.binary.left_operand->data.identifier.symbol = symbol;
+    curnode->data.binary.left_operand->data.identifier.symbol->result.type = func;
   }
   else{
     return symbol_add_from_identifier(table->parent, curnode->data.binary.left_operand, func, true);
@@ -244,27 +263,18 @@ int symbol_add_from_func_def_spec(struct symbol_table *table, struct node *node)
 */
 int symbol_add_from_decl_list(struct symbol_table *table, struct node *node, struct type *base){
   if (node == NULL) return 0;
-
+  
   switch(node->data.binary.right_operand->kind){
     case NODE_FUNC_DECL:
       symbol_add_from_func_decl(table, node->data.binary.right_operand, base);
       break;
-    case NODE_ARRAY_DECL:
-      if (base->kind == TYPE_VOID){
-        compiler_print_error(node->location, "void type is not allowed");
-        return 1;
-      }
+    case NODE_ARRAY_DECL:        
       symbol_add_from_array_decl(table, node->data.binary.right_operand, base);
       break;
     case NODE_POINTER_DECL:
       symbol_add_from_pointer_decl(table, node->data.binary.right_operand, base);
       break;
     case NODE_IDENTIFIER :
-      if (base->kind == TYPE_VOID){
-        compiler_print_error(node->location, "void type for  %s is not allowed",\
-          node->data.binary.right_operand->data.identifier.name);
-        return 1;
-      }
       symbol_add_from_identifier(table, node->data.binary.right_operand, base, true);
       break;
     default:
@@ -278,7 +288,13 @@ int symbol_add_from_decl_list(struct symbol_table *table, struct node *node, str
 /*function_declarator*/
 int symbol_add_from_func_decl(struct symbol_table *table, struct node *node, struct type *rettype){
   struct type *func = NULL;
+  
   func = symbol_func_create(node, rettype, false);
+  if (func == NULL) return 1;
+
+  if (node->data.binary.left_operand->kind == NODE_POINTER_DECL){
+    return symbol_add_from_pointer_decl(table, node->data.binary.left_operand, func);
+  }
   return symbol_add_from_identifier(table, node->data.binary.left_operand, func, true); 
 }
 
@@ -293,6 +309,12 @@ int symbol_add_from_func_decl(struct symbol_table *table, struct node *node, str
 int symbol_add_from_pointer_decl(struct symbol_table *table, struct node *node, struct type *base){
   struct node *curnode = NULL;
   struct type *pointert = NULL;
+
+  if (base != NULL && base->kind == TYPE_VOID){
+    compiler_print_error(node->location, "void type is not allowed");
+    return 1;
+  }
+
   pointert = type_pointer_decl_create(node->data.binary.left_operand);
   type_pointer_closure(pointert, base);
   
@@ -318,14 +340,27 @@ int symbol_add_from_pointer_decl(struct symbol_table *table, struct node *node, 
 */
 int symbol_add_from_array_decl(struct symbol_table *table, struct node *node, struct type *base){
   struct node *curnode = NULL;
+  struct type *arrayt = NULL;
 
-  struct type *arrayt = type_array_decl_create(node);
-  arrayt->data.arraytype.target = base;
-  curnode = node->data.binary.left_operand;
-  if (type_verify_incomplete_array(arrayt, false)){
-    compiler_print_error(node->location, "incomplete array type is not allowed.");
+  if (base != NULL && base->kind == TYPE_VOID){
+    compiler_print_error(node->location, "void type is not allowed");
     return 1;
   }
+  /*if (base->kind == TYPE_BASIC){
+    newnode = symbol_convert_to_pointer_decl(node);
+    if (node->parent == NULL) 
+      return symbol_add_from_pointer_decl(table, newnode, base);
+  }*/
+  if (node->kind == NODE_ARRAY_DECL){
+    arrayt = type_array_decl_create(node);
+    arrayt->data.arraytype.target = base;
+    curnode = node->data.binary.left_operand;
+    if (type_verify_incomplete_array(arrayt, false)){
+      compiler_print_error(node->location, "incomplete array type is not allowed.");
+      return 1;
+    }
+  }
+  
   if (curnode->kind == NODE_ARRAY_DECL)
     return symbol_add_from_array_decl(table, curnode, arrayt);
   else if (curnode->kind == NODE_POINTER_DECL)
@@ -340,7 +375,63 @@ int symbol_add_from_array_decl(struct symbol_table *table, struct node *node, st
   return 0;
 }
 
+/*
+convert first dimension of array decl to pointer decl
+*/
+struct node *symbol_convert_to_pointer_decl(struct node *top){
+  struct node *newnode = NULL;
+  struct node *pnode = NULL;
+  enum node_type ntype;
+  struct node *node = NULL;
+  struct node *curnode = top;
+  if (top == NULL) return NULL;
+  /*assert(top->kind == NODE_ARRAY_DECL);*/
+  if (curnode->kind == NODE_IDENTIFIER) return top;
+  while(curnode && curnode->kind != NODE_IDENTIFIER){
+    node = curnode;
+    if (curnode->kind == NODE_POINTER_DECL)
+      curnode = curnode->data.binary.right_operand;
+    else if (curnode->kind == NODE_ARRAY_DECL )
+      curnode = curnode->data.binary.left_operand;
+    else if (curnode->kind == NODE_ABSTR_DECL )
+      curnode = curnode->data.binary.left_operand;
+    else
+       break;
+  }
+  if (node->kind != NODE_ARRAY_DECL && node->kind != NODE_ABSTR_DECL) return top;
 
+  pnode = node_one_operand(NODE_POINTER, "*", NULL, node->location);
+  newnode = node_two_operands(NODE_POINTER_DECL, "pointer_decl", pnode, node->data.binary.left_operand, node->location);
+  newnode->parent = node->parent;   
+  pnode->parent = newnode;
+  ntype = node->parent->ntype;
+  switch (ntype){
+    case NODE_UNARY:
+      node->parent->data.unary.child_operand = newnode;
+      break;
+    case NODE_BINARY:
+      if (node->parent->data.binary.left_operand == node)
+        node->parent->data.binary.left_operand = newnode;
+      else
+        node->parent->data.binary.right_operand = newnode;
+      break;
+    case NODE_TERNARY:
+      if (node->parent->data.ternary.left_operand == node)
+        node->parent->data.ternary.left_operand = newnode;
+      else if (node->parent->data.ternary.middle_operand == node)
+        node->parent->data.ternary.left_operand = newnode;
+      else
+        node->parent->data.ternary.right_operand = newnode;
+      break;
+    default:
+      return top;
+  }
+  node->data.binary.left_operand = NULL;
+  node->data.binary.right_operand = NULL;
+  node->parent = NULL;
+  free(node); 
+  return newnode;
+}
 /***********************************/
 /* symbol_add_from_label - add new label to labels table
   parameters - table - symbol table that has link to labels table
@@ -357,13 +448,13 @@ int symbol_add_from_label(struct symbol_table *table, struct node *id, bool bdef
   
   label_list = symbol_find_label(table, id);
 
-  if (label_list != NULL && bdefine) { 
+  if (label_list != NULL) { 
 
-    if (label_list->kind == LABEL_DEFINE)
+    if (bdefine && label_list->kind == LABEL_DEFINE)
       compiler_print_error(id->location, "label: %s defined multiple times.", id->data.identifier.name);
-    else
-      label_list->kind = LABEL_DEFINE;
-
+    else 
+      label_list->kind = bdefine ? LABEL_DEFINE: label_list->kind;
+    
     return 0;
   }
 
@@ -371,7 +462,10 @@ int symbol_add_from_label(struct symbol_table *table, struct node *id, bool bdef
   assert(NULL != label_list);
 
   strncpy(label_list->name, id->data.identifier.name, IDENTIFIER_MAX);
-  
+  strncpy(label_list->symbol.name, id->data.identifier.name, IDENTIFIER_MAX);
+  strncpy(label_list->symbol.table_name, table->name, IDENTIFIER_MAX);
+  id->data.identifier.symbol = &label_list->symbol;
+
   label_list->location = id->location;
   label_list->kind = bdefine ? LABEL_DEFINE : LABEL_REFER;
   label_list->next = label_table->labels;
@@ -397,6 +491,7 @@ struct symbol_label_list *symbol_find_label(struct symbol_table *table, struct n
   
   for (iter = lbltable->labels; NULL != iter; iter = iter->next) {
     if (strcmp(id->data.identifier.name, iter->name) == 0) {
+      id->data.identifier.symbol = &iter->symbol;
       return iter;
     }
   }
@@ -427,7 +522,7 @@ void symbol_check_labels(struct symbol_table *table){
 }
 
 /****************************************/
-static int isvoid(struct node *node){
+static int has_params(struct node *node){
     struct node *curnode = NULL;
     struct type* vtype = NULL;
     if (node == NULL) return 1;
@@ -444,12 +539,47 @@ static int isvoid(struct node *node){
     return 1;
 }
 
+int symbol_check_params(struct node *node, struct typelist* paramtypelist, int *nparams){
+   struct typelist *lst = paramtypelist;
+   int isvoidseen = 0;
+   
+   while(lst && lst->curtype){
+      if (isvoidseen){
+        compiler_print_error(node->location, "parameter cannot be a void type\n");
+        return 1;
+      }
+      else if (lst->curtype->kind == TYPE_VOID)
+        isvoidseen = 1;
+      else if (lst->curtype->kind == TYPE_FUNCTION || 
+               (lst->curtype->kind == TYPE_POINTER && lst->curtype->data.ptrtype.target->kind == TYPE_FUNCTION) ){
+        compiler_print_error(node->location, "parameter cannot be a function type\n");
+        return 1;
+      }
+      lst = lst->next;
+      *nparams += 1;
+   }
+   return 0;
+}
+
 /*helper to create function type */
 struct type *symbol_func_create(struct node *node, struct type *rettype, bool badd){
   struct typelist *paramtypelist = NULL;
   struct type *functype = NULL;
-  
-  if (node->kind == NODE_FUNC_DECL && isvoid(node) == 0){
+  int nparams = 0;
+
+  if (rettype->kind == TYPE_FUNCTION || (rettype->kind == TYPE_POINTER && rettype->data.ptrtype.target->kind == TYPE_FUNCTION)){
+    compiler_print_error(node->location, "function return type cannot be function or function pointer");
+    return NULL;
+  }
+  if (node->data.binary.left_operand->kind == NODE_FUNC_DECL){
+    compiler_print_error(node->data.binary.left_operand->location, "function return type cannot be function or function pointer");
+    return NULL;
+  }
+  if (node->data.binary.left_operand->kind != NODE_IDENTIFIER){
+    compiler_print_error(node->data.binary.left_operand->location, "function return type cannot be function or function pointer");
+    return NULL;
+  }
+  if (node->kind == NODE_FUNC_DECL && has_params(node) == 0){
      paramtypelist = NULL;
   }
   else{
@@ -459,27 +589,92 @@ struct type *symbol_func_create(struct node *node, struct type *rettype, bool ba
     paramtypelist->curtype = NULL;
     type_list_create(node->data.binary.right_operand, paramtypelist, badd);
   }
+  if (symbol_check_params(node,paramtypelist, &nparams) == 1) return NULL;
+
   functype = type_function();
   functype->data.functype.rvaltype = rettype;
   functype->data.functype.params = paramtypelist;
+  functype->data.functype.nparams = nparams;
   return functype;
 }
+
+
 
 /*helper to add parameters to symbol table*/
 int  symbol_add_from_func_paramlst(struct symbol_table *table, struct type *func){
    struct typelist *param = NULL;
-   if (func == NULL ||  func->data.functype.params == NULL)
+   if (func == NULL )
     return 1;
    
    param = func->data.functype.params;
    while(param){
+     if (param->id && param->curtype)
      symbol_add_from_identifier(table, param->id, param->curtype, true);
+
      param = param->next;
    }
    return 0;
 }
 
+void symbol_add_string(struct node *node){
+  static int nlabel;
+  struct string_table *next = NULL;
+  struct string_table *prev = NULL;
+  struct string_table *item = NULL;
+  assert (node->kind == NODE_STRING);
 
+  if (node->data.string_literal.string[0] == '\0') return;
+  if ((item = symbol_find_string(node->data.string_literal.rstring)) != NULL){
+    node->data.string_literal.entry = item;
+    node->data.string_literal.entry->result.type = item->result.type;
+  }
+  else {    
+    item = malloc (sizeof (struct string_table));
+    assert (item != NULL);
+    
+    item->next = NULL; 
+    item->string = strdup(node->data.string_literal.rstring);
+    /*
+    item->string = malloc(node->data.string_literal.strlen + 1);
+    strcpy(item->string, node->data.string_literal.string);
+    item->string[node->data.string_literal.strlen] = '\0';
+    */
+    sprintf(item->label, "StringLabel_%d",++nlabel);
+
+    if (head == NULL) {
+      head = item;
+      head->next = NULL;
+    }
+    else{
+      next = head;
+      prev = head;
+      while(next){
+        prev = next;
+        next = next->next;
+      }
+      prev->next = item;      
+    }    
+    item->result.type = type_array();
+    item->result.type->data.arraytype.hassize = true;
+    item->result.type->data.arraytype.arrsize = strlen(item->string); /*node->data.string_literal.strlen;*/
+    item->result.type->data.arraytype.target = type_basic(false, TYPE_BASIC_CHAR);
+    item->result.islvalue = 1;
+
+    node->data.string_literal.entry = item;
+  }
+}
+
+struct string_table *symbol_find_string(char *s){
+  struct string_table *curitem = head;
+  if (head == NULL) return NULL;
+  if (s[0] == '\0') return NULL;
+
+  while (curitem){
+    if (strcmp(curitem->string, s) == 0) return curitem;
+    curitem = curitem->next;
+  }
+  return NULL;
+}
 /****************************************/
 /*symbol_parse_ast - parses the AST 
   parameters: table - current symbol table in which entry has to be added
@@ -588,8 +783,11 @@ void symbol_parse_ast(struct symbol_table *table, struct node *node) {
       case NODE_CONTINUE:
         symbol_parse_ast(table, node->data.unary.child_operand);
         break;
-      case NODE_NUMBER:
+      
       case NODE_STRING:
+        symbol_add_string(node);
+        break;
+      case NODE_NUMBER:
       case NODE_EXPRESSION_STATEMENT:
       case NODE_BINARY_OPERATION: 
       case NODE_NULL_STATEMENT:
@@ -749,4 +947,108 @@ void symbol_print_paramlist(FILE *output, struct type *f){
       if (lst)fputs(",", output);
   }
   fputs(")", output);
+}
+
+struct symbol_table *symbol_find_table(struct symbol *symbol){
+  struct symbol_table *parent = NULL;
+  struct symbol_table *curtable = NULL;
+  struct type *t = NULL;
+  
+  t = symbol->result.type;
+  assert(t->kind == TYPE_FUNCTION);
+ 
+  parent = symbol->table;
+  curtable = parent->children;
+
+  while(curtable){
+    if (strcmp(symbol->name, curtable->name) == 0)return curtable;
+    curtable = curtable->next;
+  }
+  return NULL;
+}
+
+int symbol_is_func_param(struct typelist *params, char *name){
+  struct typelist *lst = params;
+   if (name[0] == '\0') return 0;
+   if (lst == NULL) return 0;
+
+   while(lst && lst->curtype){
+      if (strcmp(lst->id->data.identifier.name, name) == 0) return 1;
+      lst = lst->next;
+   }
+   return 0;
+}
+
+int symbol_calculate_stack_frame_size(struct symbol *symbol){
+  struct symbol_table *curtable = symbol_find_table(symbol);
+  if (curtable == NULL) return 0;
+  return symbol_calculate_curtable_size(curtable, symbol);
+}
+
+int symbol_calculate_curtable_size(struct symbol_table *table, struct symbol *symbol){
+  struct symbol_list *sym_iter = NULL;  
+  struct type *functype = NULL;
+  struct type *t = NULL;
+  int size = 0;
+  int pack = 0;
+  int cursz = 0;
+  if (table == NULL) return 0;
+  
+  functype = symbol->result.type;
+
+  for (sym_iter = table->variables; NULL != sym_iter; sym_iter = sym_iter->next) { 
+     t = sym_iter->symbol.result.type;
+     if (symbol_is_func_param(functype->data.functype.params, sym_iter->symbol.name)) continue;
+
+     cursz = type_get_alignment_size(t, size, &pack, DEF_MULTIPLIER); /*default multiplier 1*/
+     size += (cursz + pack);
+  }
+
+  size += symbol_calculate_block_size(table, symbol);
+  return size;
+}
+
+int symbol_calculate_block_size(struct symbol_table *parent, struct symbol *symbol){
+  struct symbol_table *child= parent->children;
+  int block_sz = 0;
+  int ret_sz = 0;
+
+  while(child){
+    block_sz = symbol_calculate_curtable_size(child, symbol);
+    if (block_sz >= ret_sz) ret_sz = block_sz;
+    child = child->next;
+  }
+  return ret_sz;
+}
+
+void symbol_print_strings(FILE *output){
+  struct string_table *curitem = head;
+  if (head == NULL) return;
+ 
+  while (curitem){
+    fprintf(output, "%s: %10s %s\n",curitem->label, ".asciiz",curitem->string);
+    curitem = curitem->next;
+  }
+}
+
+void symbol_print_globals(FILE *output, struct symbol_table *global){
+  struct symbol_list *sym_iter = NULL;  
+  struct type *t = NULL;
+  /*int size = 0, padding = 0;*/
+  if (global == NULL) return;
+ 
+  for (sym_iter = global->variables; NULL != sym_iter; sym_iter = sym_iter->next) { 
+     t = sym_iter->symbol.result.type;
+    if (t->kind == TYPE_FUNCTION) continue;
+     /*size = type_get_alignment_size(t, 0, &padding, 1);*/
+    if (t->kind == TYPE_POINTER)
+      fprintf(output, "%s:\n.word %d\n",sym_iter->symbol.name, 0); 
+
+    if (t->kind == TYPE_BASIC && t->data.basic.datatype == TYPE_BASIC_INT)
+      fprintf(output, "%s:\n.word %d\n",sym_iter->symbol.name, 0); 
+    if (t->kind == TYPE_BASIC && t->data.basic.datatype == TYPE_BASIC_SHORT)
+      fprintf(output, "%s:\n.half %d\n",sym_iter->symbol.name, 0); 
+    if (t->kind == TYPE_BASIC && t->data.basic.datatype == TYPE_BASIC_CHAR)
+      fprintf(output, "%s:\n.byte %d\n",sym_iter->symbol.name, 0); 
+   }
 }
